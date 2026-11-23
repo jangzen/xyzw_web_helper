@@ -114,19 +114,20 @@ test("point reward selection uses server points and claimed map for daily and we
 test("config version is verified each run while immutable configuration requests are merged", async () => {
   let reads = 0;
   let versions = 0;
-  const store = {
-    async sendMessageWithPromise() {
+  const fetchConfig = async (url) => {
+    if (url.endsWith("/data/version.json")) {
       versions++;
-      return { dataBundleVer: "test-config-merge" };
-    },
-  };
-  const fetchConfig = async () => {
+      return {
+        ok: true,
+        json: async () => ({ version: "test-config-merge" }),
+      };
+    }
     reads++;
     return { ok: true, json: async () => officialConfig() };
   };
   const [a, b] = await Promise.all([
-    loadDailyTaskConfig(store, "a", fetchConfig),
-    loadDailyTaskConfig(store, "b", fetchConfig),
+    loadDailyTaskConfig({}, "a", fetchConfig),
+    loadDailyTaskConfig({}, "b", fetchConfig),
   ]);
   assert.equal(a, b);
   assert.equal(reads, 1);
@@ -135,31 +136,23 @@ test("config version is verified each run while immutable configuration requests
 
 test("failed config reads can be retried and unsafe versions are rejected", async () => {
   let attempt = 0;
-  const store = {
-    async sendMessageWithPromise() {
-      return { dataBundleVer: "test-config-retry" };
-    },
+  const fetchConfig = async (url) => {
+    if (url.endsWith("/data/version.json"))
+      return {
+        ok: true,
+        json: async () => ({ version: "test-config-retry" }),
+      };
+    return { ok: ++attempt > 1, json: async () => officialConfig() };
   };
-  const fetchConfig = async () => ({
-    ok: ++attempt > 1,
-    json: async () => officialConfig(),
-  });
-  await assert.rejects(
-    loadDailyTaskConfig(store, "a", fetchConfig),
-    /读取失败/,
-  );
-  await loadDailyTaskConfig(store, "a", fetchConfig);
+  await assert.rejects(loadDailyTaskConfig({}, "a", fetchConfig), /读取失败/);
+  await loadDailyTaskConfig({}, "a", fetchConfig);
   assert.equal(attempt, 2);
   await assert.rejects(
-    loadDailyTaskConfig(
-      {
-        async sendMessageWithPromise() {
-          return { dataBundleVer: "../invalid" };
-        },
-      },
-      "a",
-      fetchConfig,
-    ),
+    loadDailyTaskConfig({}, "a", async (url) => {
+      if (url.endsWith("/data/version.json"))
+        return { ok: true, json: async () => ({ version: "../invalid" }) };
+      return { ok: true, json: async () => officialConfig() };
+    }),
     /有效/,
   );
 });
@@ -179,11 +172,16 @@ test("an evicted failed config request cannot remove a newer cached request for 
     entered = resolve;
   });
   let readsA = 0;
-  const store = {
-    sendMessageWithPromise: async (id) => ({ dataBundleVer: id }),
-  };
+  const versions = [
+    "cache-race-a",
+    "cache-race-b",
+    "cache-race-a",
+    "cache-race-a",
+  ];
   const fetchConfig = async (url) => {
-    if (url.includes("cache-race-a") && ++readsA === 1) {
+    if (url.endsWith("/data/version.json"))
+      return { ok: true, json: async () => ({ version: versions.shift() }) };
+    if (url.includes("/data/cache-race-a/config.json") && ++readsA === 1) {
       entered();
       return new Promise((resolve, reject) => {
         rejectFirst = reject;
@@ -191,13 +189,13 @@ test("an evicted failed config request cannot remove a newer cached request for 
     }
     return { ok: true, json: async () => officialConfig() };
   };
-  const first = loadDailyTaskConfig(store, "cache-race-a", fetchConfig);
+  const first = loadDailyTaskConfig({}, "cache-race-a", fetchConfig);
   const rejected = assert.rejects(first, /first request failed/);
   await started;
-  await loadDailyTaskConfig(store, "cache-race-b", fetchConfig);
-  await loadDailyTaskConfig(store, "cache-race-a", fetchConfig);
+  await loadDailyTaskConfig({}, "cache-race-b", fetchConfig);
+  await loadDailyTaskConfig({}, "cache-race-a", fetchConfig);
   rejectFirst(new Error("first request failed"));
   await rejected;
-  await loadDailyTaskConfig(store, "cache-race-a", fetchConfig);
+  await loadDailyTaskConfig({}, "cache-race-a", fetchConfig);
   assert.equal(readsA, 2);
 });
